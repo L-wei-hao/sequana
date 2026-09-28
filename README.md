@@ -95,6 +95,7 @@ SEQUANA_WORKERS=2
 Run:
 
 ```bash
+cd backend
 cargo run
 ```
 
@@ -166,12 +167,12 @@ The node records the response ID, model, input tokens, cached input tokens, and 
 During early V1 development, the database schema is deliberately kept in one file:
 
 ```text
-migrations/0001_init.sql
+backend/migrations/001_init.sql
 ```
 
 Do not add incremental migration files yet.
 
-Because `0001_init.sql` is still being edited, an existing disposable development database may have an old migration checksum. Reset only a disposable local V1 database with:
+Because `001_init.sql` is still being edited, an existing disposable development database may have an old migration checksum. Reset only a disposable local V1 database with:
 
 ```bash
 docker compose down -v
@@ -185,6 +186,7 @@ Do not use that reset command against a database containing data you need.
 Backend:
 
 ```bash
+cd backend
 cargo test --all-targets
 ```
 

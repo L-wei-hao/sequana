@@ -22,7 +22,7 @@ services:
 
   sequana:
     build:
-      context: .
+      context: ./backend
     restart: unless-stopped
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-sequana}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sequana}

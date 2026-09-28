@@ -32,8 +32,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo test --all-targets
+        working-directory: backend
 
       - name: Backend smoke test
+        working-directory: backend
         env:
           DATABASE_URL: postgres://sequana:sequana@localhost:5432/sequana
           SEQUANA_CREDENTIAL_KEY: "0101010101010101010101010101010101010101010101010101010101010101"
@@ -83,7 +85,7 @@ jobs:
 
           python3 -c 'import json,sys; data=json.load(sys.stdin); assert data["output"]["status"] == 200; assert data["output"]["body"]["ok"] is True' <<< "$result"
 
-          python3 scripts/ci_webhook_smoke.py
+          python3 ../scripts/ci_webhook_smoke.py
 
       - uses: actions/setup-node@v4
         with:
