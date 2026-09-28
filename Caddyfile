@@ -1,0 +1,17 @@
+{$SEQUANA_ADDRESS} {
+    handle /api/* {
+        reverse_proxy sequana:8080
+    }
+
+    handle /webhook/* {
+        reverse_proxy sequana:8080
+    }
+
+    handle /health {
+        reverse_proxy sequana:8080
+    }
+
+    handle {
+        reverse_proxy frontend:80
+    }
+}

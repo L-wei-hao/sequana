@@ -1,0 +1,54 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      SEQUANA_ADDRESS: ${SEQUANA_ADDRESS:-:80}
+    ports:
+      - "${SEQUANA_HTTP_PORT:-80}:80"
+      - "${SEQUANA_HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - sequana
+
+  frontend:
+    build:
+      context: ./frontend
+    restart: unless-stopped
+
+  sequana:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-sequana}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-sequana}
+      SEQUANA_CREDENTIAL_KEY: ${SEQUANA_CREDENTIAL_KEY:?set SEQUANA_CREDENTIAL_KEY}
+      SEQUANA_ADMIN_TOKEN: ${SEQUANA_ADMIN_TOKEN:?set SEQUANA_ADMIN_TOKEN}
+      SEQUANA_WORKERS: ${SEQUANA_WORKERS:-2}
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-sequana}
+      POSTGRES_USER: ${POSTGRES_USER:-sequana}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sequana} -d ${POSTGRES_DB:-sequana}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+  caddy_data:
+  caddy_config:

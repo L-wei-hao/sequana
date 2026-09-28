@@ -1,0 +1,403 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #172033;
+  background: #f4f6f8;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 1024px;
+  min-height: 100vh;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button {
+  border: 1px solid #cbd3dc;
+  background: white;
+  color: #172033;
+  border-radius: 7px;
+  padding: 7px 11px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  background: #f2f5f7;
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+button.active {
+  background: #172033;
+  color: white;
+  border-color: #172033;
+}
+
+button.danger {
+  color: #a32020;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  border: 1px solid #ccd4dd;
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: white;
+  color: inherit;
+}
+
+textarea,
+pre,
+.mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+textarea {
+  resize: vertical;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  margin: 14px 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  margin: 0;
+  font-size: 12px;
+}
+
+.muted {
+  color: #667180;
+  font-size: 12px;
+}
+
+.topbar {
+  height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 16px;
+  background: white;
+  border-bottom: 1px solid #dce2e8;
+}
+
+.topbar > div,
+.topbar nav,
+.toolbar-actions,
+.execution-header,
+.section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar nav {
+  margin-left: auto;
+}
+
+.banner {
+  min-height: 36px;
+  padding: 8px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.banner.error,
+.error {
+  background: #fff1f1;
+  color: #8b1b1b;
+}
+
+.banner.notice {
+  background: #eef8f2;
+  color: #1e6d3c;
+}
+
+.banner-close {
+  border: 0;
+  background: transparent;
+  padding: 0 4px;
+}
+
+.connect-page {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+}
+
+.connect-card {
+  width: 380px;
+  padding: 28px;
+  background: white;
+  border: 1px solid #dce2e8;
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(20, 30, 45, 0.08);
+}
+
+.connect-card h1 {
+  margin: 0;
+}
+
+.editor-shell {
+  height: calc(100vh - 54px);
+  display: grid;
+  grid-template-columns: 220px 1fr 310px;
+}
+
+.sidebar,
+.settings,
+.execution-list {
+  background: white;
+  overflow: auto;
+}
+
+.sidebar {
+  border-right: 1px solid #dce2e8;
+}
+
+.settings {
+  border-left: 1px solid #dce2e8;
+  padding: 14px;
+}
+
+.panel-section {
+  padding: 14px;
+  border-bottom: 1px solid #edf0f3;
+}
+
+.section-title {
+  justify-content: space-between;
+  font-weight: 700;
+  margin-bottom: 10px;
+}
+
+.node-list {
+  display: grid;
+  gap: 6px;
+}
+
+.node-list button {
+  text-align: left;
+}
+
+.canvas-panel {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 48px 1fr;
+}
+
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 12px;
+  background: #fafbfc;
+  border-bottom: 1px solid #dce2e8;
+}
+
+.canvas {
+  min-height: 0;
+}
+
+.sequana-node {
+  min-width: 145px;
+  border: 1px solid #8d98a6 !important;
+  border-radius: 8px !important;
+  box-shadow: 0 2px 5px rgba(20, 30, 45, 0.08) !important;
+}
+
+.node-manual_trigger,
+.node-webhook,
+.node-schedule {
+  border-width: 2px !important;
+}
+
+.result {
+  margin-top: 18px;
+  border-top: 1px solid #dce2e8;
+  padding-top: 14px;
+}
+
+.result pre {
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  border-radius: 7px;
+  background: #f4f6f8;
+}
+
+.executions-shell {
+  height: calc(100vh - 54px);
+  display: grid;
+  grid-template-columns: 330px 1fr;
+}
+
+.execution-list {
+  border-right: 1px solid #dce2e8;
+  padding: 12px;
+}
+
+.execution {
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 6px 8px;
+  align-items: center;
+  text-align: left;
+  margin-bottom: 7px;
+}
+
+.execution > .muted:last-child {
+  grid-column: 1 / -1;
+}
+
+.execution.active {
+  border-color: #172033;
+  background: #f3f6f9;
+  color: inherit;
+}
+
+.execution-detail {
+  overflow: auto;
+  padding: 20px;
+}
+
+.execution-header {
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.execution-header h2 {
+  margin: 0 0 7px;
+}
+
+.status {
+  display: inline-block;
+  width: fit-content;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e9edf2;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.status-succeeded {
+  background: #e8f6ed;
+  color: #1f6f3d;
+}
+
+.status-failed {
+  background: #fdeaea;
+  color: #962020;
+}
+
+.status-running {
+  background: #e8f0fb;
+  color: #235a9b;
+}
+
+.status-cancelled {
+  background: #f2eeee;
+  color: #695454;
+}
+
+.steps {
+  display: grid;
+  gap: 8px;
+}
+
+.step {
+  border: 1px solid #dce2e8;
+  border-radius: 8px;
+  background: white;
+}
+
+.step summary {
+  display: grid;
+  grid-template-columns: auto minmax(150px, 1fr) 180px auto;
+  gap: 10px;
+  align-items: center;
+  padding: 11px;
+  cursor: pointer;
+}
+
+.step-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  background: #dce2e8;
+  border-top: 1px solid #dce2e8;
+}
+
+.step-grid > div {
+  min-width: 0;
+  padding: 12px;
+  background: #fafbfc;
+}
+
+.step-grid h4 {
+  margin: 0 0 8px;
+}
+
+.empty-state {
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: #667180;
+}
+
+.credentials-shell {
+  min-height: calc(100vh - 54px);
+  padding: 32px;
+}
+
+.credentials-card {
+  width: min(720px, 100%);
+  margin: 0 auto;
+  padding: 22px;
+  background: white;
+  border: 1px solid #dce2e8;
+  border-radius: 10px;
+}
+
+.credential-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 22px;
+}
+
+.credential-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  padding: 11px 12px;
+  border: 1px solid #e2e7ec;
+  border-radius: 8px;
+}
+
+.credential-row .mono {
+  overflow-wrap: anywhere;
+  text-align: right;
+}
