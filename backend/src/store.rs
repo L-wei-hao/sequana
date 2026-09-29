@@ -1,4 +1,6 @@
 use crate::engine::model::{ExecutionStatus, WorkflowDefinition};
+mod lifecycle;
+mod replay;
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{
@@ -14,6 +16,9 @@ pub enum StoreError {
     },
     Database(sqlx::Error),
     NotFound(&'static str),
+    LeaseLost,
+    PayloadProtection,
+    IdempotencyConflict,
 }
 
 impl std::fmt::Display for StoreError {
@@ -24,6 +29,11 @@ impl std::fmt::Display for StoreError {
             }
             Self::Database(err) => write!(f, "database error: {}", err),
             Self::NotFound(item) => write!(f, "{} not found", item),
+            Self::LeaseLost => f.write_str("work lease was lost"),
+            Self::PayloadProtection => f.write_str("execution payload protection failed"),
+            Self::IdempotencyConflict => f.write_str(
+                "idempotency key was already used with a different or unverifiable payload",
+            ),
         }
     }
 }
@@ -39,6 +49,9 @@ impl From<sqlx::Error> for StoreError {
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
+    owner: Uuid,
+    shutdown: tokio_util::sync::CancellationToken,
+    cipher: Option<std::sync::Arc<crate::credentials::CredentialCipher>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -143,7 +156,16 @@ pub struct JobRecord {
 
 impl Store {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            owner: Uuid::new_v4(),
+            shutdown: tokio_util::sync::CancellationToken::new(),
+            cipher: None,
+        }
+    }
+
+    pub fn shutdown_token(&self) -> tokio_util::sync::CancellationToken {
+        self.shutdown.clone()
     }
 
     pub async fn create_workflow(
@@ -394,7 +416,16 @@ impl Store {
     ) -> Result<Vec<WorkflowSummaryRecord>, StoreError> {
         let rows = sqlx::query_as::<
             _,
-            (Uuid, String, Option<String>, bool, Option<Uuid>, Uuid, i32, String),
+            (
+                Uuid,
+                String,
+                Option<String>,
+                bool,
+                Option<Uuid>,
+                Uuid,
+                i32,
+                String,
+            ),
         >(
             r#"
             SELECT
@@ -457,7 +488,16 @@ impl Store {
     ) -> Result<Option<WorkflowSummaryRecord>, StoreError> {
         let row = sqlx::query_as::<
             _,
-            (Uuid, String, Option<String>, bool, Option<Uuid>, Uuid, i32, String),
+            (
+                Uuid,
+                String,
+                Option<String>,
+                bool,
+                Option<Uuid>,
+                Uuid,
+                i32,
+                String,
+            ),
         >(
             r#"
             SELECT
@@ -537,13 +577,11 @@ impl Store {
         .await?;
 
         Ok(row.map(
-            |(tenant_id, workflow_id, workflow_version_id, definition)| {
-                WorkflowVersionRecord {
-                    tenant_id,
-                    workflow_id,
-                    workflow_version_id,
-                    definition: definition.0,
-                }
+            |(tenant_id, workflow_id, workflow_version_id, definition)| WorkflowVersionRecord {
+                tenant_id,
+                workflow_id,
+                workflow_version_id,
+                definition: definition.0,
             },
         ))
     }
@@ -568,13 +606,11 @@ impl Store {
         .await?;
 
         Ok(row.map(
-            |(tenant_id, workflow_id, workflow_version_id, definition)| {
-                WorkflowVersionRecord {
-                    tenant_id,
-                    workflow_id,
-                    workflow_version_id,
-                    definition: definition.0,
-                }
+            |(tenant_id, workflow_id, workflow_version_id, definition)| WorkflowVersionRecord {
+                tenant_id,
+                workflow_id,
+                workflow_version_id,
+                definition: definition.0,
             },
         ))
     }
@@ -656,17 +692,16 @@ impl Store {
         .await?;
 
         Ok(row.map(
-            |(tenant_id, workflow_id, workflow_version_id, definition)| {
-                WorkflowVersionRecord {
-                    tenant_id,
-                    workflow_id,
-                    workflow_version_id,
-                    definition: definition.0,
-                }
+            |(tenant_id, workflow_id, workflow_version_id, definition)| WorkflowVersionRecord {
+                tenant_id,
+                workflow_id,
+                workflow_version_id,
+                definition: definition.0,
             },
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn create_execution(
         &self,
         tenant_id: Uuid,
@@ -678,6 +713,28 @@ impl Store {
         idempotency_key: Option<&str>,
         retry_of: Option<Uuid>,
     ) -> Result<CreatedExecution, StoreError> {
+        let fingerprint = if idempotency_key.is_some() {
+            let cipher = self.cipher.as_ref().ok_or(StoreError::PayloadProtection)?;
+            let mut fingerprint_input = crate::credentials::SecretJson(input.clone());
+            if let Some(headers) = fingerprint_input
+                .0
+                .get_mut("headers")
+                .and_then(Value::as_object_mut)
+            {
+                headers.retain(|name, _| {
+                    !name.eq_ignore_ascii_case("idempotency-key")
+                        && !name.eq_ignore_ascii_case("x-idempotency-key")
+                });
+            }
+            let serialized = zeroize::Zeroizing::new(
+                serde_json::to_vec(&fingerprint_input.0)
+                    .map_err(|_| StoreError::PayloadProtection)?,
+            );
+            Some(cipher.payload_fingerprint(tenant_id, &serialized).to_vec())
+        } else {
+            None
+        };
+        let (input, encrypted) = self.protect_payload(tenant_id, input)?;
         let inserted = sqlx::query_scalar::<_, Uuid>(
             r#"
             INSERT INTO executions (
@@ -688,9 +745,12 @@ impl Store {
                 trigger_node_id,
                 input,
                 idempotency_key,
-                retry_of_execution_id
+                idempotency_fingerprint,
+                retry_of_execution_id,
+                input_encrypted,
+                lease_owner
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             ON CONFLICT (workflow_id, idempotency_key)
                 WHERE idempotency_key IS NOT NULL
             DO NOTHING
@@ -704,7 +764,10 @@ impl Store {
         .bind(trigger_node_id)
         .bind(input)
         .bind(idempotency_key)
+        .bind(&fingerprint)
         .bind(retry_of)
+        .bind(encrypted)
+        .bind(self.owner)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -712,20 +775,36 @@ impl Store {
             return Ok(CreatedExecution { id, created: true });
         }
 
-        let idempotency_key =
-            idempotency_key.ok_or(StoreError::NotFound("created execution"))?;
-        let id = sqlx::query_scalar::<_, Uuid>(
+        let idempotency_key = idempotency_key.ok_or(StoreError::NotFound("created execution"))?;
+        let (id, stored_fingerprint): (Uuid, Option<Vec<u8>>) = sqlx::query_as(
             r#"
-            SELECT id
+            SELECT id, idempotency_fingerprint
             FROM executions
             WHERE workflow_id = $1
               AND idempotency_key = $2
+              AND tenant_id = $3
             "#,
         )
         .bind(workflow_id)
         .bind(idempotency_key)
+        .bind(tenant_id)
         .fetch_one(&self.pool)
         .await?;
+
+        let expected = fingerprint
+            .as_deref()
+            .ok_or(StoreError::IdempotencyConflict)?;
+        let same_payload = stored_fingerprint.as_deref().is_some_and(|stored| {
+            stored.len() == expected.len()
+                && stored
+                    .iter()
+                    .zip(expected)
+                    .fold(0u8, |difference, (left, right)| difference | (left ^ right))
+                    == 0
+        });
+        if !same_payload {
+            return Err(StoreError::IdempotencyConflict);
+        }
 
         Ok(CreatedExecution { id, created: false })
     }
@@ -742,10 +821,23 @@ impl Store {
             return Err(StoreError::InvalidTransition { from, to });
         }
 
+        let (output, encrypted) = if let Some(output) = output {
+            let tenant: Uuid = sqlx::query_scalar("SELECT tenant_id FROM executions WHERE id=$1")
+                .bind(execution_id)
+                .fetch_one(&self.pool)
+                .await?;
+            let (diagnostic, encrypted) = self.protect_payload(tenant, output)?;
+            (Some(diagnostic), encrypted)
+        } else {
+            (None, None)
+        };
+
         let result = sqlx::query(
             r#"
             UPDATE executions
             SET status = $3,
+                lease_owner = CASE WHEN $3 = 'running' THEN $6 ELSE lease_owner END,
+                lease_expires_at = CASE WHEN $3 = 'running' THEN now() + interval '90 seconds' ELSE lease_expires_at END,
                 attempts = CASE WHEN $3 = 'running' THEN attempts + 1 ELSE attempts END,
                 started_at = CASE
                     WHEN $3 = 'running' THEN COALESCE(started_at, now())
@@ -756,16 +848,21 @@ impl Store {
                     ELSE finished_at
                 END,
                 output = COALESCE($4, output),
+                output_encrypted = COALESCE($7, output_encrypted),
                 error = $5
             WHERE id = $1
               AND status = $2
+              AND lease_expires_at > now()
+              AND lease_owner = $6
             "#,
         )
         .bind(execution_id)
         .bind(from.as_str())
         .bind(to.as_str())
-        .bind(output.cloned())
-        .bind(error)
+        .bind(output)
+        .bind(crate::telemetry::sanitized_error(error))
+        .bind(self.owner)
+        .bind(encrypted)
         .execute(&self.pool)
         .await?;
 
@@ -788,14 +885,18 @@ impl Store {
                 status,
                 input
             )
-            VALUES ($1, $2, $3, 'running', $4)
+            SELECT id, $2, $3, 'running', $4 FROM executions
+            WHERE id = $1 AND status = 'running' AND lease_owner = $5
+              AND lease_expires_at > now()
+            FOR UPDATE
             RETURNING id
             "#,
         )
         .bind(execution_id)
         .bind(node_id)
         .bind(node_type)
-        .bind(input)
+        .bind(crate::telemetry::sanitize(input))
+        .bind(self.owner)
         .fetch_one(&self.pool)
         .await?)
     }
@@ -809,6 +910,12 @@ impl Store {
     ) -> Result<bool, StoreError> {
         let result = sqlx::query(
             r#"
+            WITH owned AS MATERIALIZED (
+                SELECT e.id FROM executions e JOIN execution_steps s ON s.execution_id=e.id
+                WHERE s.id=$1 AND e.lease_owner=$5 AND e.lease_expires_at > now()
+                  AND e.status IN ('running','cancelled')
+                FOR UPDATE OF e
+            )
             UPDATE execution_steps
             SET status = CASE WHEN $3::text IS NULL THEN 'succeeded' ELSE 'failed' END,
                 output = $2,
@@ -821,12 +928,14 @@ impl Store {
                 )
             WHERE id = $1
               AND status = 'running'
+              AND execution_id IN (SELECT id FROM owned)
             "#,
         )
         .bind(step_id)
-        .bind(output.cloned())
-        .bind(error)
-        .bind(metadata.cloned())
+        .bind(output.map(crate::telemetry::sanitize))
+        .bind(crate::telemetry::sanitized_error(error))
+        .bind(metadata.map(crate::telemetry::sanitize))
+        .bind(self.owner)
         .execute(&self.pool)
         .await?;
 
@@ -1197,15 +1306,15 @@ impl Store {
 
         Ok(rows
             .into_iter()
-            .map(|(id, name, kind, created_at, updated_at)| {
-                CredentialSummaryRecord {
+            .map(
+                |(id, name, kind, created_at, updated_at)| CredentialSummaryRecord {
                     id,
                     name,
                     kind,
                     created_at,
                     updated_at,
-                }
-            })
+                },
+            )
             .collect())
     }
 
@@ -1227,12 +1336,14 @@ impl Store {
         .fetch_optional(&self.pool)
         .await?;
 
-        Ok(row.map(|(id, name, kind, encrypted_value)| CredentialRecord {
-            id,
-            name,
-            kind,
-            encrypted_value,
-        }))
+        Ok(
+            row.map(|(id, name, kind, encrypted_value)| CredentialRecord {
+                id,
+                name,
+                kind,
+                encrypted_value,
+            }),
+        )
     }
 
     pub async fn active_schedule_workflows(
@@ -1254,13 +1365,11 @@ impl Store {
         Ok(rows
             .into_iter()
             .map(
-                |(tenant_id, workflow_id, workflow_version_id, definition)| {
-                    WorkflowVersionRecord {
-                        tenant_id,
-                        workflow_id,
-                        workflow_version_id,
-                        definition: definition.0,
-                    }
+                |(tenant_id, workflow_id, workflow_version_id, definition)| WorkflowVersionRecord {
+                    tenant_id,
+                    workflow_id,
+                    workflow_version_id,
+                    definition: definition.0,
                 },
             )
             .collect())
@@ -1305,14 +1414,13 @@ impl Store {
     }
 
     pub async fn claim_job(&self) -> Result<Option<JobRecord>, StoreError> {
-        let row = sqlx::query_as::<
-            _,
-            (Uuid, Uuid, Uuid, Uuid, String, DateTime<Utc>, i32),
-        >(
+        let row = sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, DateTime<Utc>, i32)>(
             r#"
             UPDATE jobs
             SET status = 'running',
-                attempts = attempts + 1
+                attempts = attempts + 1,
+                lease_owner = $1,
+                lease_expires_at = now() + interval '90 seconds'
             WHERE id = (
                 SELECT id
                 FROM jobs
@@ -1332,6 +1440,7 @@ impl Store {
                 attempts
             "#,
         )
+        .bind(self.owner)
         .fetch_optional(&self.pool)
         .await?;
 
@@ -1361,19 +1470,24 @@ impl Store {
         job_id: Uuid,
         execution_id: Uuid,
     ) -> Result<(), StoreError> {
-        sqlx::query(
+        let result = sqlx::query(
             r#"
             UPDATE jobs
             SET execution_id = $2
             WHERE id = $1
               AND status = 'running'
+              AND lease_owner = $3 AND lease_expires_at > now()
             "#,
         )
         .bind(job_id)
         .bind(execution_id)
+        .bind(self.owner)
         .execute(&self.pool)
         .await?;
 
+        if result.rows_affected() != 1 {
+            return Err(StoreError::LeaseLost);
+        }
         Ok(())
     }
 
@@ -1391,70 +1505,44 @@ impl Store {
                 finished_at = now()
             WHERE id = $1
               AND status = 'running'
+              AND lease_owner = $4 AND lease_expires_at > now()
             "#,
         )
         .bind(job_id)
         .bind(succeeded)
-        .bind(error)
+        .bind(crate::telemetry::sanitized_error(error))
+        .bind(self.owner)
         .execute(&self.pool)
         .await?;
 
         Ok(())
     }
 
+    /// Only expired leases are terminalized. Never replay uncertain side effects.
     pub async fn recover_interrupted_work(&self) -> Result<(), StoreError> {
         let mut tx = self.pool.begin().await?;
-
+        let expired = sqlx::query_scalar::<_, Uuid>(
+            "UPDATE executions SET status = 'failed', finished_at = now(),
+             error = 'execution lease expired; side effects may have occurred; manual review required'
+             WHERE status IN ('queued', 'running') AND lease_expires_at <= now()
+             RETURNING id"
+        ).fetch_all(&mut *tx).await?;
         sqlx::query(
-            r#"
-            UPDATE execution_steps
-            SET status = 'failed',
-                error = COALESCE(error, 'server restarted during execution'),
-                finished_at = now(),
-                duration_ms = GREATEST(
-                    0,
-                    (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::BIGINT
-                )
-            WHERE status = 'running'
-            "#,
+            "UPDATE execution_steps SET status = 'failed', finished_at = now(),
+             error = 'execution lease expired; outcome uncertain',
+             duration_ms = GREATEST(0, (EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::BIGINT)
+             WHERE execution_id = ANY($1) AND status = 'running'",
+        )
+        .bind(&expired)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "UPDATE jobs SET status = 'failed', finished_at = now(),
+             error = 'job lease expired; side effects may have occurred; manual review required'
+             WHERE status = 'running' AND lease_expires_at <= now()",
         )
         .execute(&mut *tx)
         .await?;
-
-        sqlx::query(
-            r#"
-            UPDATE executions
-            SET status = 'failed',
-                error = COALESCE(error, 'server restarted during execution'),
-                finished_at = now()
-            WHERE status = 'running'
-               OR (
-                    status = 'queued'
-                    AND id IN (
-                        SELECT execution_id
-                        FROM jobs
-                        WHERE status = 'running'
-                          AND execution_id IS NOT NULL
-                    )
-               )
-            "#,
-        )
-        .execute(&mut *tx)
-        .await?;
-
-        sqlx::query(
-            r#"
-            UPDATE jobs
-            SET status = 'queued',
-                execution_id = NULL,
-                error = 'requeued after server restart',
-                finished_at = NULL
-            WHERE status = 'running'
-            "#,
-        )
-        .execute(&mut *tx)
-        .await?;
-
         tx.commit().await?;
         Ok(())
     }

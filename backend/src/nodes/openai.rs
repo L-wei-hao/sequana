@@ -67,25 +67,31 @@ pub async fn execute_openai(
         return Err("credential is not an OpenAI credential".into());
     }
 
-    let api_key_raw = context.credentials.decrypt(context.tenant_id, &credential.encrypted_value)?;
-    let api_key = if let Ok(parsed) = serde_json::from_str::<Value>(&api_key_raw) {
+    let api_key_raw = context
+        .credentials
+        .decrypt(context.tenant_id, &credential.encrypted_value)?;
+    let parsed = serde_json::from_str::<crate::credentials::SecretJson>(&api_key_raw).ok();
+    let api_key = if let Some(parsed) = &parsed {
         parsed
+            .0
             .get("api_key")
             .and_then(Value::as_str)
             .unwrap_or(&api_key_raw)
-            .to_string()
     } else {
-        api_key_raw.trim().to_string()
+        api_key_raw.trim()
     };
 
     let request = build_request(&config, input)?;
 
-    let response = context
+    let request = context
         .http
         .post("https://api.openai.com/v1/responses")
         .bearer_auth(api_key)
         .timeout(Duration::from_millis(config.timeout_ms))
-        .json(&request)
+        .json(&request);
+    drop(parsed);
+    drop(api_key_raw);
+    let response = request
         .send()
         .await
         .map_err(|error| format!("OpenAI request failed: {error}"))?;

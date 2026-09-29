@@ -257,7 +257,7 @@ pub async fn run_manual(
         input,
     )
     .await
-    .map_err(AppError::internal)?;
+    .map_err(|error| AppError::execution_failure(&error))?;
 
     Ok(Json(json!({
         "execution_id": execution.id,
@@ -288,7 +288,7 @@ pub async fn test_node(
 
     let result = execute_node(&request.node, &request.input, &context)
         .await
-        .map_err(AppError::bad_request)?;
+        .map_err(|error| AppError::node_test_failure(&error))?;
 
     Ok(Json(json!({
         "output": result.output,
@@ -310,7 +310,9 @@ fn ensure_trigger(
         .ok_or_else(|| AppError::not_found("trigger node not found"))?;
 
     if node.node_type != expected {
-        return Err(AppError::bad_request("node is not the requested trigger type"));
+        return Err(AppError::bad_request(
+            "node is not the requested trigger type",
+        ));
     }
 
     Ok(())

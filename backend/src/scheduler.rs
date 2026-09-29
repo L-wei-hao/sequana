@@ -6,16 +6,28 @@ use chrono::Utc;
 use std::sync::Arc;
 use tokio::time::{sleep, Duration};
 
-pub fn start_scheduler(store: Arc<Store>) {
-    tokio::spawn(schedule_loop(store));
+pub fn start_scheduler(store: Arc<Store>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(schedule_loop(store))
 }
 
 async fn schedule_loop(store: Arc<Store>) {
+    let shutdown = store.shutdown_token();
     loop {
-        if let Err(error) = enqueue_upcoming(&store).await {
-            eprintln!("scheduler error: {error}");
+        if shutdown.is_cancelled() {
+            break;
         }
-        sleep(Duration::from_secs(15)).await;
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            result = enqueue_upcoming(&store) => {
+                if let Err(error) = result {
+                    eprintln!("scheduler error: {error}");
+                }
+            }
+        }
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = sleep(Duration::from_secs(15)) => {}
+        }
     }
 }
 

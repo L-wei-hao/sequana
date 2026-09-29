@@ -1427,7 +1427,7 @@ sequana/
 │   ├── .dockerignore
 │   │
 │   ├── migrations/
-│   │   └── 001_init.sql
+│   │   └── 0001_init.sql
 │   │
 │   ├── src/
 │   │   ├── main.rs
@@ -1772,10 +1772,10 @@ Avoid one custom error enum per folder.
 All V1 schema creation remains in:
 
 ```text
-backend/migrations/001_init.sql
+backend/migrations/0001_init.sql
 ```
 
-During active V1 development, amend `001_init.sql` directly.
+During active V1 development, amend `0001_init.sql` directly.
 
 Do not create:
 
@@ -2020,7 +2020,7 @@ Do commit:
 .env.example
 Cargo.lock
 package-lock.json
-001_init.sql
+0001_init.sql
 ```
 
 ---
@@ -2036,7 +2036,7 @@ The following rules apply throughout V1:
    Do not introduce frontend packages or a component library.
 
 3. **One initial migration.**
-   Keep the V1 schema in `001_init.sql` until the first released schema must be preserved.
+   Keep the V1 schema in `0001_init.sql` until the first released schema must be preserved.
 
 4. **No generic `utils` dumping ground.**
    A helper stays next to the feature that uses it until two real callers justify moving it.

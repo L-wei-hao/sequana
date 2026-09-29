@@ -1,5 +1,8 @@
 use crate::{
-    api::authorize, credentials::CredentialCipher, error::AppError, state::AppState,
+    api::authorize,
+    credentials::{CredentialCipher, SecretJson},
+    error::AppError,
+    state::AppState,
 };
 use axum::{
     extract::{Path, State},
@@ -37,7 +40,7 @@ pub async fn list_credentials(
 pub struct CreateCredentialRequest {
     pub name: String,
     pub kind: String,
-    pub value: Value,
+    pub value: SecretJson,
 }
 
 pub async fn create_credential(
@@ -51,8 +54,9 @@ pub async fn create_credential(
         return Err(AppError::bad_request("credential name cannot be empty"));
     }
 
-    let payload_str = CredentialCipher::validate_and_serialize_payload(&request.kind, &request.value)
-        .map_err(AppError::bad_request)?;
+    let payload_str =
+        CredentialCipher::validate_and_serialize_payload(&request.kind, &request.value.0)
+            .map_err(AppError::bad_request)?;
 
     let encrypted = state
         .credentials
@@ -71,7 +75,7 @@ pub async fn create_credential(
 pub struct UpdateCredentialRequest {
     pub name: String,
     #[serde(default)]
-    pub value: Option<Value>,
+    pub value: Option<SecretJson>,
 }
 
 pub async fn update_credential(
@@ -93,8 +97,9 @@ pub async fn update_credential(
         .ok_or_else(|| AppError::not_found("credential not found"))?;
 
     let encrypted = if let Some(new_val) = request.value {
-        let payload_str = CredentialCipher::validate_and_serialize_payload(&existing.kind, &new_val)
-            .map_err(AppError::bad_request)?;
+        let payload_str =
+            CredentialCipher::validate_and_serialize_payload(&existing.kind, &new_val.0)
+                .map_err(AppError::bad_request)?;
         state
             .credentials
             .encrypt(tenant_id, &payload_str)
@@ -122,7 +127,10 @@ pub async fn delete_credential(
 ) -> Result<Json<Value>, AppError> {
     let tenant_id = authorize(&headers, &state)?;
 
-    let deleted = state.store.delete_credential(tenant_id, credential_id).await?;
+    let deleted = state
+        .store
+        .delete_credential(tenant_id, credential_id)
+        .await?;
     if !deleted {
         return Err(AppError::not_found("credential not found"));
     }

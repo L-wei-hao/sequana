@@ -37,10 +37,16 @@ CREATE TABLE executions (
         CHECK (status IN ('queued', 'running', 'succeeded', 'failed', 'cancelled')),
     input JSONB NOT NULL DEFAULT '{}'::jsonb,
     output JSONB,
+    input_encrypted BYTEA,
+    output_encrypted BYTEA,
     error TEXT,
     idempotency_key TEXT,
+    idempotency_fingerprint BYTEA
+        CHECK (idempotency_fingerprint IS NULL OR octet_length(idempotency_fingerprint) = 32),
     retry_of_execution_id UUID REFERENCES executions(id) ON DELETE SET NULL,
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    lease_owner UUID,
+    lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '90 seconds'),
     started_at TIMESTAMPTZ,
     finished_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -55,6 +61,10 @@ CREATE INDEX executions_workflow_created_idx
 
 CREATE INDEX executions_status_idx
     ON executions (status, created_at);
+
+CREATE INDEX executions_expired_lease_idx
+    ON executions (lease_expires_at)
+    WHERE status IN ('queued', 'running');
 
 CREATE TABLE execution_steps (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -102,6 +112,8 @@ CREATE TABLE jobs (
     attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
     execution_id UUID REFERENCES executions(id) ON DELETE SET NULL,
     error TEXT,
+    lease_owner UUID,
+    lease_expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + interval '90 seconds'),
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at TIMESTAMPTZ,
     UNIQUE (workflow_id, workflow_version_id, trigger_node_id, run_at)
@@ -109,3 +121,7 @@ CREATE TABLE jobs (
 
 CREATE INDEX jobs_due_idx
     ON jobs (status, run_at);
+
+CREATE INDEX jobs_expired_lease_idx
+    ON jobs (lease_expires_at)
+    WHERE status = 'running';

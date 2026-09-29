@@ -20,8 +20,8 @@ pub async fn run_webhook_with_node(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let workflow_id = Uuid::parse_str(&workflow_id)
-        .map_err(|_| AppError::bad_request("invalid workflow_id"))?;
+    let workflow_id =
+        Uuid::parse_str(&workflow_id).map_err(|_| AppError::bad_request("invalid workflow_id"))?;
 
     let workflow = state
         .store
@@ -44,7 +44,9 @@ pub async fn run_webhook_slug(
         .store
         .active_workflow_by_slug(&slug)
         .await?
-        .ok_or_else(|| AppError::not_found(format!("active workflow not found for path: {slug}")))?;
+        .ok_or_else(|| {
+            AppError::not_found(format!("active workflow not found for path: {slug}"))
+        })?;
 
     execute_webhook_request(state, workflow, None, method, uri, headers, body).await
 }
@@ -83,14 +85,8 @@ async fn execute_webhook_request(
             .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&body).into_owned()))
     };
 
-    let header_map: Map<String, Value> = headers
-        .iter()
-        .filter_map(|(k, v)| {
-            v.to_str()
-                .ok()
-                .map(|val| (k.to_string(), Value::String(val.to_string())))
-        })
-        .collect();
+    let idempotency_key = webhook_idempotency_key(&headers, &node_id)?;
+    let header_map = workflow_header_map(&headers, idempotency_key.as_ref());
 
     let input = json!({
         "method": method.as_str(),
@@ -99,19 +95,6 @@ async fn execute_webhook_request(
         "headers": header_map,
         "body": body_json
     });
-
-    let idempotency_key = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.is_empty())
-        .map(|value| format!("{node_id}:{value}"));
-
-    if idempotency_key
-        .as_ref()
-        .is_some_and(|key| key.len() > 512)
-    {
-        return Err(AppError::bad_request("idempotency-key is too long"));
-    }
 
     let execution = state
         .store
@@ -122,7 +105,9 @@ async fn execute_webhook_request(
             "webhook",
             &node_id,
             &input,
-            idempotency_key.as_deref(),
+            idempotency_key
+                .as_ref()
+                .map(|idempotency_key| idempotency_key.storage_key.as_str()),
             None,
         )
         .await?;
@@ -130,7 +115,7 @@ async fn execute_webhook_request(
     if !execution.created {
         let existing = state
             .store
-            .execution(workflow.tenant_id, execution.id)
+            .execution_for_replay(workflow.tenant_id, execution.id)
             .await?
             .ok_or_else(|| AppError::internal("could not retrieve existing execution"))?;
 
@@ -171,12 +156,84 @@ async fn execute_webhook_request(
         input,
     )
     .await
-    .map_err(AppError::internal)?;
+    .map_err(|error| AppError::execution_failure(&error))?;
 
     Ok(response_from_output(output))
 }
 
-fn response_from_output(mut output: Value) -> Response {
+struct WebhookIdempotencyKey {
+    storage_key: String,
+    header_value: String,
+}
+
+fn workflow_header_map(
+    headers: &HeaderMap,
+    idempotency_key: Option<&WebhookIdempotencyKey>,
+) -> Map<String, Value> {
+    let mut header_map: Map<String, Value> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), Value::String(value.to_owned())))
+        })
+        .collect();
+
+    if let Some(idempotency_key) = idempotency_key {
+        header_map.retain(|name, _| {
+            !name.eq_ignore_ascii_case("idempotency-key")
+                && !name.eq_ignore_ascii_case("x-idempotency-key")
+        });
+        header_map.insert(
+            "idempotency-key".to_owned(),
+            Value::String(idempotency_key.header_value.clone()),
+        );
+    }
+
+    header_map
+}
+
+fn webhook_idempotency_key(
+    headers: &HeaderMap,
+    node_id: &str,
+) -> Result<Option<WebhookIdempotencyKey>, AppError> {
+    fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Result<Option<&'a str>, AppError> {
+        let mut values = headers.get_all(name).iter();
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err(AppError::bad_request(
+                "idempotency-key header must appear only once",
+            ));
+        }
+        value
+            .to_str()
+            .map(Some)
+            .map_err(|_| AppError::bad_request("idempotency-key must be valid text"))
+    }
+
+    let standard = header_value(headers, "idempotency-key")?;
+    let prefixed = header_value(headers, "x-idempotency-key")?;
+    if standard.is_some() && prefixed.is_some() && standard != prefixed {
+        return Err(AppError::bad_request("conflicting idempotency-key headers"));
+    }
+
+    let Some(value) = standard.or(prefixed).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let key = format!("{node_id}:{value}");
+    if key.len() > 512 {
+        return Err(AppError::bad_request("idempotency-key is too long"));
+    }
+    Ok(Some(WebhookIdempotencyKey {
+        storage_key: key,
+        header_value: value.to_owned(),
+    }))
+}
+
+fn response_from_output(output: Value) -> Response {
     let status = output
         .get("status")
         .and_then(Value::as_u64)
@@ -212,4 +269,57 @@ fn response_from_output(mut output: Value) -> Response {
     }
 
     response
+}
+
+#[cfg(test)]
+mod idempotency_header_tests {
+    use super::*;
+
+    #[test]
+    fn supports_both_idempotency_header_names() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-idempotency-key", HeaderValue::from_static("payload-key"));
+        let key = webhook_idempotency_key(&headers, "start").unwrap().unwrap();
+        assert_eq!(key.storage_key, "start:payload-key");
+        assert_eq!(key.header_value, "payload-key");
+    }
+
+    #[test]
+    fn rejects_conflicting_idempotency_header_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("idempotency-key", HeaderValue::from_static("first"));
+        headers.insert("x-idempotency-key", HeaderValue::from_static("second"));
+        let error = webhook_idempotency_key(&headers, "start").err().unwrap();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn rejects_repeated_idempotency_header_values() {
+        let mut headers = HeaderMap::new();
+        headers.append("idempotency-key", HeaderValue::from_static("first"));
+        headers.append("idempotency-key", HeaderValue::from_static("second"));
+        let error = webhook_idempotency_key(&headers, "start").err().unwrap();
+        assert_eq!(error.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn equivalent_aliases_produce_identical_workflow_headers() {
+        let mut standard = HeaderMap::new();
+        standard.insert("idempotency-key", HeaderValue::from_static("payload-key"));
+        let standard_key = webhook_idempotency_key(&standard, "start")
+            .unwrap()
+            .unwrap();
+
+        let mut prefixed = HeaderMap::new();
+        prefixed.insert("x-idempotency-key", HeaderValue::from_static("payload-key"));
+        let prefixed_key = webhook_idempotency_key(&prefixed, "start")
+            .unwrap()
+            .unwrap();
+
+        let standard_input = workflow_header_map(&standard, Some(&standard_key));
+        let prefixed_input = workflow_header_map(&prefixed, Some(&prefixed_key));
+        assert_eq!(standard_input, prefixed_input);
+        assert_eq!(standard_input["idempotency-key"], "payload-key");
+        assert!(!standard_input.contains_key("x-idempotency-key"));
+    }
 }

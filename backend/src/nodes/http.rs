@@ -4,7 +4,7 @@ use crate::{
     nodes::{resolve_template, NodeContext},
 };
 use reqwest::{
-    header::{HeaderName, HeaderValue, AUTHORIZATION},
+    header::{HeaderName, HeaderValue},
     Method,
 };
 use serde::Deserialize;
@@ -63,8 +63,8 @@ pub async fn execute_http(
 
     if let Some(cred_id_str) = config.credential_id {
         if !cred_id_str.trim().is_empty() {
-            let cred_id = Uuid::parse_str(&cred_id_str)
-                .map_err(|e| format!("invalid credential_id: {e}"))?;
+            let cred_id =
+                Uuid::parse_str(&cred_id_str).map_err(|e| format!("invalid credential_id: {e}"))?;
             let record = context
                 .store
                 .credential(context.tenant_id, cred_id)
@@ -72,7 +72,8 @@ pub async fn execute_http(
                 .map_err(|e| format!("failed to load HTTP credential: {e:?}"))?
                 .ok_or_else(|| format!("HTTP credential not found: {cred_id}"))?;
 
-            request = apply_credential_auth(request, context.credentials, context.tenant_id, &record)?;
+            request =
+                apply_credential_auth(request, context.credentials, context.tenant_id, &record)?;
         }
     }
 
@@ -117,11 +118,13 @@ pub async fn execute_http(
         .text()
         .await
         .map_err(|error| format!("failed to read HTTP response: {error}"))?;
-    let body = serde_json::from_str(&text).unwrap_or_else(|_| Value::String(text));
-
     if status >= 400 && !config.continue_on_http_error {
         return Err(format!("HTTP {status}: {text}"));
     }
+    let body = match serde_json::from_str(&text) {
+        Ok(body) => body,
+        Err(_) => Value::String(text),
+    };
 
     Ok(NodeResult::new(json!({
         "status": status,
@@ -149,14 +152,14 @@ fn apply_credential_auth(
         "http_bearer" => {
             let payload: CredentialPayload = serde_json::from_str(&decrypted)
                 .map_err(|_| "failed to parse bearer credential".to_string())?;
-            if let CredentialPayload::HttpBearer { token } = payload {
+            if let CredentialPayload::HttpBearer { token } = &payload {
                 request = request.bearer_auth(token);
             }
         }
         "http_basic" => {
             let payload: CredentialPayload = serde_json::from_str(&decrypted)
                 .map_err(|_| "failed to parse basic credential".to_string())?;
-            if let CredentialPayload::HttpBasic { username, password } = payload {
+            if let CredentialPayload::HttpBasic { username, password } = &payload {
                 request = request.basic_auth(username, Some(password));
             }
         }
@@ -166,11 +169,11 @@ fn apply_credential_auth(
             if let CredentialPayload::HttpHeader {
                 header_name,
                 header_value,
-            } = payload
+            } = &payload
             {
-                let name = HeaderName::from_str(&header_name)
+                let name = HeaderName::from_str(header_name)
                     .map_err(|e| format!("invalid header name: {e}"))?;
-                let val = HeaderValue::from_str(&header_value)
+                let val = HeaderValue::from_str(header_value)
                     .map_err(|e| format!("invalid header value: {e}"))?;
                 request = request.header(name, val);
             }
@@ -178,7 +181,11 @@ fn apply_credential_auth(
         "openai" => {
             request = request.bearer_auth(decrypted.trim());
         }
-        other => return Err(format!("unsupported credential kind for HTTP node: {other}")),
+        other => {
+            return Err(format!(
+                "unsupported credential kind for HTTP node: {other}"
+            ))
+        }
     }
     Ok(request)
 }

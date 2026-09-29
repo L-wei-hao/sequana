@@ -47,7 +47,70 @@ pub fn next_node_ids(
         .collect())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn run_execution(
+    store: &Store,
+    database: &PgPool,
+    http: &Client,
+    credentials: &CredentialCipher,
+    tenant_id: Uuid,
+    execution_id: Uuid,
+    workflow: &WorkflowDefinition,
+    start_node_id: &str,
+    input: Value,
+) -> Result<Value, String> {
+    let shutdown = store.shutdown_token();
+    if shutdown.is_cancelled() {
+        store
+            .interrupt_execution(execution_id)
+            .await
+            .map_err(|_| "failed to persist interruption")?;
+        return Err("server is shutting down".into());
+    }
+    let result = {
+        let execution = run_execution_inner(
+            store,
+            database,
+            http,
+            credentials,
+            tenant_id,
+            execution_id,
+            workflow,
+            start_node_id,
+            input,
+        );
+        tokio::pin!(execution);
+        let grace = async {
+            shutdown.cancelled().await;
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        };
+        tokio::pin!(grace);
+        let period = std::time::Duration::from_secs(20);
+        let mut heartbeat = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+        loop {
+            tokio::select! {
+                result = &mut execution => break result,
+                _ = &mut grace => break Err("shutdown grace expired; outcome uncertain".into()),
+                _ = heartbeat.tick() => {
+                    match store.heartbeat_execution(execution_id).await {
+                        Ok(true) => {},
+                        _ => break Err("execution lease lost; outcome uncertain".into()),
+                    }
+                }
+            }
+        }
+    }; // Drop the node future before persisting an uncertain outcome.
+    if result.is_err() {
+        store
+            .interrupt_execution(execution_id)
+            .await
+            .map_err(|_| "failed to persist execution interruption")?;
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_execution_inner(
     store: &Store,
     database: &PgPool,
     http: &Client,
@@ -94,6 +157,9 @@ pub async fn run_execution(
     let mut final_outputs = Vec::new();
 
     while let Some((node_id, node_input)) = queue.pop_front() {
+        if store.shutdown_token().is_cancelled() {
+            return Err("execution interrupted by shutdown".into());
+        }
         if state_cancelled(store, tenant_id, execution_id).await? {
             return Err("execution cancelled".into());
         }
@@ -105,12 +171,7 @@ pub async fn run_execution(
             .ok_or_else(|| format!("node disappeared during execution: {node_id}"))?;
 
         let step_id = store
-            .start_step(
-                execution_id,
-                &node.id,
-                node.node_type.as_str(),
-                &node_input,
-            )
+            .start_step(execution_id, &node.id, node.node_type.as_str(), &node_input)
             .await
             .map_err(|error| format!("failed to start execution step: {error:?}"))?;
 
@@ -131,16 +192,16 @@ pub async fn run_execution(
             }
         };
 
-        if let Err(error) = store
+        let persisted = store
             .finish_step(
                 step_id,
                 Some(&result.output),
                 None,
                 result.metadata.as_ref(),
             )
-            .await
-        {
-            let message = format!("failed to finish execution step: {error:?}");
+            .await;
+        if !matches!(persisted, Ok(true)) {
+            let message = "failed to persist execution step; lease or state changed".to_string();
             let _ = store
                 .transition_execution(
                     execution_id,
@@ -170,14 +231,13 @@ pub async fn run_execution(
             continue;
         }
 
-        let next_count = next.len();
-        for (idx, next_node_id) in next.into_iter().enumerate() {
-            let node_payload = if idx == next_count - 1 {
-                result.output
-            } else {
-                result.output.clone()
-            };
-            queue.push_back((next_node_id, node_payload));
+        let mut next = next.into_iter().peekable();
+        while let Some(next_node_id) = next.next() {
+            if next.peek().is_none() {
+                queue.push_back((next_node_id, result.output));
+                break;
+            }
+            queue.push_back((next_node_id, result.output.clone()));
         }
     }
 

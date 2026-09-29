@@ -12,17 +12,12 @@ use sqlx::{
 };
 use std::time::Duration;
 
-#[derive(Deserialize)]
+#[derive(Default, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum SqlMode {
+    #[default]
     Query,
     Execute,
-}
-
-impl Default for SqlMode {
-    fn default() -> Self {
-        Self::Query
-    }
 }
 
 #[derive(Deserialize)]
@@ -147,20 +142,27 @@ pub async fn execute_postgres(
                 username,
                 password,
                 ssl_mode,
-            } = payload
+            } = &payload
             {
-                let encoded_password = urlencoding::encode(&password);
-                let conn_str = format!(
+                let encoded_password = zeroize::Zeroizing::new(urlencoding::encode(password));
+                let conn_str = zeroize::Zeroizing::new(format!(
                     "postgres://{}:{}@{}:{}/{}?sslmode={}",
-                    username, encoded_password, host, port, database, ssl_mode
-                );
+                    username,
+                    encoded_password.as_str(),
+                    host,
+                    port,
+                    database,
+                    ssl_mode
+                ));
 
                 let target_pool = PgPoolOptions::new()
                     .max_connections(2)
                     .acquire_timeout(Duration::from_secs(5))
                     .connect(&conn_str)
                     .await
-                    .map_err(|e| format!("failed to connect to external PostgreSQL database: {e}"))?;
+                    .map_err(|e| {
+                        format!("failed to connect to external PostgreSQL database: {e}")
+                    })?;
 
                 return run_query_on_pool(&target_pool, &config.query, config.mode, params).await;
             }
@@ -209,7 +211,9 @@ async fn run_query_on_pool(
                 .execute(pool)
                 .await
                 .map_err(|error| format!("PostgreSQL execute failed: {error}"))?;
-            Ok(NodeResult::new(json!({ "rows_affected": result.rows_affected() })))
+            Ok(NodeResult::new(
+                json!({ "rows_affected": result.rows_affected() }),
+            ))
         }
         SqlMode::Query => {
             let sql = raw_query.trim().trim_end_matches(';');

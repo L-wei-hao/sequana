@@ -61,10 +61,7 @@ pub async fn get_execution(
         .await?
         .ok_or_else(|| AppError::not_found("execution not found"))?;
 
-    let steps = state
-        .store
-        .execution_steps(tenant_id, execution_id)
-        .await?;
+    let steps = state.store.execution_steps(tenant_id, execution_id).await?;
 
     Ok(Json(json!({
         "id": execution.id,
@@ -104,7 +101,7 @@ pub async fn retry_execution(
     let tenant_id = authorize(&headers, &state)?;
     let previous = state
         .store
-        .execution(tenant_id, execution_id)
+        .execution_for_replay(tenant_id, execution_id)
         .await?
         .ok_or_else(|| AppError::not_found("execution not found"))?;
 
@@ -148,7 +145,7 @@ pub async fn retry_execution(
         previous.input,
     )
     .await
-    .map_err(AppError::internal)?;
+    .map_err(|error| AppError::execution_failure(&error))?;
 
     Ok(Json(json!({
         "execution_id": retry.id,
@@ -164,7 +161,11 @@ pub async fn cancel_execution(
 ) -> Result<Json<Value>, AppError> {
     let tenant_id = authorize(&headers, &state)?;
 
-    if !state.store.cancel_execution(tenant_id, execution_id).await? {
+    if !state
+        .store
+        .cancel_execution(tenant_id, execution_id)
+        .await?
+    {
         return Err(AppError::conflict("execution is not queued or running"));
     }
 

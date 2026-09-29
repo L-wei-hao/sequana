@@ -90,7 +90,11 @@ DATABASE_URL=postgres://sequana:password@localhost:5432/sequana
 SEQUANA_CREDENTIAL_KEY=<64 hex characters>
 SEQUANA_ADMIN_TOKEN=<at least 32 characters>
 SEQUANA_WORKERS=2
+SEQUANA_MAX_IN_FLIGHT_EXECUTIONS=32
 ```
+
+`SEQUANA_MAX_IN_FLIGHT_EXECUTIONS` bounds simultaneous manual runs, webhook executions,
+retries, and node tests. Saturated execution routes return HTTP 503 with `Retry-After: 1`.
 
 Run:
 
@@ -167,12 +171,12 @@ The node records the response ID, model, input tokens, cached input tokens, and 
 During early V1 development, the database schema is deliberately kept in one file:
 
 ```text
-backend/migrations/001_init.sql
+backend/migrations/0001_init.sql
 ```
 
 Do not add incremental migration files yet.
 
-Because `001_init.sql` is still being edited, an existing disposable development database may have an old migration checksum. Reset only a disposable local V1 database with:
+Because `0001_init.sql` is still being edited, an existing disposable development database may have an old migration checksum. Reset only a disposable local V1 database with:
 
 ```bash
 docker compose down -v

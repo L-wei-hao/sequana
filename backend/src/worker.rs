@@ -17,16 +17,18 @@ pub fn start_workers(
     http: Client,
     credentials: Arc<CredentialCipher>,
     workers: usize,
-) {
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut handles = Vec::with_capacity(workers.max(1));
     for worker_id in 0..workers.max(1) {
-        tokio::spawn(worker_loop(
+        handles.push(tokio::spawn(worker_loop(
             worker_id,
             store.clone(),
             database.clone(),
             http.clone(),
             credentials.clone(),
-        ));
+        )));
     }
+    handles
 }
 
 async fn worker_loop(
@@ -36,39 +38,62 @@ async fn worker_loop(
     http: Client,
     credentials: Arc<CredentialCipher>,
 ) {
+    let shutdown = store.shutdown_token();
     loop {
+        if shutdown.is_cancelled() {
+            break;
+        }
         match store.claim_job().await {
             Ok(Some(job)) => {
-                let result = process_job(
-                    &job,
-                    &store,
-                    &database,
-                    &http,
-                    credentials.as_ref(),
-                )
-                .await;
+                let result = {
+                    let work = process_job(&job, &store, &database, &http, credentials.as_ref());
+                    tokio::pin!(work);
+                    let period = Duration::from_secs(20);
+                    let mut heartbeat =
+                        tokio::time::interval_at(tokio::time::Instant::now() + period, period);
+                    let grace = async {
+                        shutdown.cancelled().await;
+                        sleep(Duration::from_secs(35)).await;
+                    };
+                    tokio::pin!(grace);
+                    loop {
+                        tokio::select! {
+                            result = &mut work => break result,
+                            _ = &mut grace => break Err("worker shutdown grace expired".into()),
+                            _ = heartbeat.tick() => {
+                                if !matches!(store.heartbeat_job(job.id).await, Ok(true)) {
+                                    break Err("job lease lost".into());
+                                }
+                            }
+                        }
+                    }
+                };
                 let error = result.as_ref().err().map(String::as_str);
 
-                if let Err(store_error) =
-                    store.finish_job(job.id, result.is_ok(), error).await
-                {
+                if let Err(store_error) = store.finish_job(job.id, result.is_ok(), error).await {
                     eprintln!(
                         "worker {worker_id}: failed to finish job {}: {store_error:?}",
                         job.id
                     );
                 }
 
-                if let Err(error) = result {
+                if result.is_err() {
                     eprintln!(
-                        "worker {worker_id}: job {} attempt {} failed: {}",
-                        job.id, job.attempts, error
+                        "worker {worker_id}: job {} attempt {} failed; see redacted execution diagnostics",
+                        job.id, job.attempts
                     );
                 }
             }
-            Ok(None) => sleep(Duration::from_millis(500)).await,
+            Ok(None) => tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = sleep(Duration::from_millis(500)) => {}
+            },
             Err(error) => {
                 eprintln!("worker {worker_id}: failed to claim job: {error:?}");
-                sleep(Duration::from_secs(1)).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = sleep(Duration::from_secs(1)) => {}
+                }
             }
         }
     }
@@ -82,11 +107,7 @@ async fn process_job(
     credentials: &CredentialCipher,
 ) -> Result<(), String> {
     let workflow = store
-        .workflow_version(
-            job.tenant_id,
-            job.workflow_id,
-            job.workflow_version_id,
-        )
+        .workflow_version(job.tenant_id, job.workflow_id, job.workflow_version_id)
         .await
         .map_err(|error| format!("failed to load scheduled workflow: {error:?}"))?
         .ok_or_else(|| "scheduled workflow version no longer exists".to_string())?;
@@ -95,9 +116,7 @@ async fn process_job(
         .definition
         .nodes
         .iter()
-        .find(|node| {
-            node.id == job.trigger_node_id && node.node_type == NodeType::Schedule
-        })
+        .find(|node| node.id == job.trigger_node_id && node.node_type == NodeType::Schedule)
         .ok_or_else(|| "scheduled trigger node no longer exists".to_string())?;
 
     let config = ScheduleConfig::parse(&node.config)?;
